@@ -1,0 +1,139 @@
+{
+  "info": {
+    "name": "Internal Docker Registry API",
+    "description": "查詢與刪除內網 Docker Registry 內的 image/tag。需先在 Postman 內設定 collection 變數 registry_host / username / password。",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "basic",
+    "basic": [
+      { "key": "username", "value": "{{username}}", "type": "string" },
+      { "key": "password", "value": "{{password}}", "type": "string" }
+    ]
+  },
+  "variable": [
+    { "key": "registry_host", "value": "registry.internal:5000", "type": "string" },
+    { "key": "username", "value": "EXAMPLE_ACCOUNT", "type": "string" },
+    { "key": "password", "value": "EXAMPLE_PASSWORD", "type": "string" },
+    { "key": "image_name", "value": "hello-app", "type": "string" },
+    { "key": "tag", "value": "", "type": "string" },
+    { "key": "digest", "value": "", "type": "string", "description": "由「Get Manifest Digest」的回應 header 複製貼上，供 Delete Manifest 使用" }
+  ],
+  "item": [
+    {
+      "name": "1. List Repositories (Catalog)",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Accept", "value": "application/json" }
+        ],
+        "url": {
+          "raw": "http://{{registry_host}}/v2/_catalog",
+          "protocol": "http",
+          "host": ["{{registry_host}}"],
+          "path": ["v2", "_catalog"]
+        },
+        "description": "列出 Registry 內所有 repository（image 名稱）"
+      }
+    },
+    {
+      "name": "2. List Tags for Image",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Accept", "value": "application/json" }
+        ],
+        "url": {
+          "raw": "http://{{registry_host}}/v2/{{image_name}}/tags/list",
+          "protocol": "http",
+          "host": ["{{registry_host}}"],
+          "path": ["v2", "{{image_name}}", "tags", "list"]
+        },
+        "description": "列出指定 image 的所有 tag（版本）"
+      }
+    },
+    {
+      "name": "3. Get Manifest (single-arch)",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Accept", "value": "application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json" }
+        ],
+        "url": {
+          "raw": "http://{{registry_host}}/v2/{{image_name}}/manifests/{{tag}}",
+          "protocol": "http",
+          "host": ["{{registry_host}}"],
+          "path": ["v2", "{{image_name}}", "manifests", "{{tag}}"]
+        },
+        "description": "查看單一架構 image 的 manifest 內容（layers、config 等）。若目標是 multi-arch image，這裡會回傳錯誤，請改用 #4。"
+      }
+    },
+    {
+      "name": "4. Get Manifest List / OCI Index (multi-arch)",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Accept", "value": "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json" }
+        ],
+        "url": {
+          "raw": "http://{{registry_host}}/v2/{{image_name}}/manifests/{{tag}}",
+          "protocol": "http",
+          "host": ["{{registry_host}}"],
+          "path": ["v2", "{{image_name}}", "manifests", "{{tag}}"]
+        },
+        "description": "查看 multi-arch image 的 manifest list（會列出 linux/amd64、linux/arm64 各自的 digest）。\n\nbuildx 建置的 image 預設為 OCI Index 格式（application/vnd.oci.image.index.v1+json），若用舊版 Docker manifest.list Accept header 會出現：\nMANIFEST_UNKNOWN: OCI index found, but accept header does not support OCI indexes\n\n此請求已同時帶入兩種格式的 Accept header 因應。"
+      }
+    },
+    {
+      "name": "5. Get Manifest Digest (for delete)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "const digest = pm.response.headers.get('Docker-Content-Digest');",
+              "if (digest) {",
+              "    pm.collectionVariables.set('digest', digest);",
+              "    console.log('取得 digest 並存入變數:', digest);",
+              "} else {",
+              "    console.warn('回應 header 找不到 Docker-Content-Digest，請確認 tag 是否存在');",
+              "}"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "HEAD",
+        "header": [
+          { "key": "Accept", "value": "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json" }
+        ],
+        "url": {
+          "raw": "http://{{registry_host}}/v2/{{image_name}}/manifests/{{tag}}",
+          "protocol": "http",
+          "host": ["{{registry_host}}"],
+          "path": ["v2", "{{image_name}}", "manifests", "{{tag}}"]
+        },
+        "description": "用 HEAD 取得該 tag 的 digest（回應 header 內的 Docker-Content-Digest），並自動存入 collection 變數 {{digest}}，供下一步刪除使用。\n\nAccept header 同時列出 OCI Index / Docker manifest list / 單一架構格式，因應 buildx 建置的 multi-arch image 預設為 OCI Index 格式，避免 MANIFEST_UNKNOWN 錯誤。\n\n⚠️ 若該 image 是 multi-arch，這裡拿到的是 index/manifest list 的 digest，刪除會連同所有平台版本一併移除。"
+      },
+      "response": []
+    },
+    {
+      "name": "6. Delete Manifest (irreversible)",
+      "request": {
+        "method": "DELETE",
+        "header": [
+          { "key": "Accept", "value": "application/vnd.docker.distribution.manifest.v2+json" }
+        ],
+        "url": {
+          "raw": "http://{{registry_host}}/v2/{{image_name}}/manifests/{{digest}}",
+          "protocol": "http",
+          "host": ["{{registry_host}}"],
+          "path": ["v2", "{{image_name}}", "manifests", "{{digest}}"]
+        },
+        "description": "刪除 manifest（需先執行第 5 步取得 {{digest}}）。成功回傳 202 Accepted。\n\n⚠️ 此動作僅刪除 manifest 參照，實際磁碟空間需在 Registry 主機另外執行 garbage-collect 才會釋放：\n\ndocker compose exec registry bin/registry garbage-collect /etc/docker/registry/config.yml\n\n⚠️ 執行前請務必確認 tag/digest 正確，此動作無法復原。"
+      },
+      "response": []
+    }
+  ]
+}
